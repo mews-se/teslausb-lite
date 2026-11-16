@@ -1,0 +1,12 @@
+[Unit]
+Description=teslausb-lite drives and archiving
+After=local-fs.target
+
+[Service]
+ExecStart=/usr/local/sbin/teslausb-lite run
+ExecStopPost=/usr/local/sbin/teslausb-lite stop
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

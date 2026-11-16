@@ -1,0 +1,714 @@
+#!/bin/bash
+# teslausb-lite: dashcam and sentry archiving plus the car's extra USB drives,
+# on a Raspberry Pi in USB gadget mode
+set -euo pipefail
+
+CONF=${TESLAUSB_LITE_CONF:-/etc/teslausb-lite.conf}
+STATE=${TESLAUSB_LITE_STATE:-/var/lib/teslausb-lite}
+RUN=/run/teslausb-lite
+
+HOME_SSID=
+WIFI_IFACE=wlan0
+ARCHIVE_REMOTE=
+CONTENT_REMOTE=
+CAM_SIZE=64G
+LIGHTSHOW_SIZE=2G
+BOOMBOX_SIZE=256M
+MUSIC_SIZE=0
+LOCKCHIME_DRIVE=lightshow
+ARCHIVE_TRACKMODE=no
+ARRIVAL_DELAY=120
+RESCAN_INTERVAL=900
+MIN_FREE=20G
+COW_SIZE=8G
+KEEP_AWAKE=no
+KEEP_AWAKE_COMMAND=keep-accessory-power
+KEEP_AWAKE_MAX=7200
+TESLA_VIN=
+NOTIFY_URL=
+RCLONE_FLAGS=(--transfers 2 --retries 3 --low-level-retries 10)
+
+if [ -r "$CONF" ]; then
+  # shellcheck source=/dev/null
+  . "$CONF"
+fi
+
+GADGET=/sys/kernel/config/usb_gadget/teslausb-lite
+CAM_DM=teslausb-lite-cam
+SNAP_DM=teslausb-lite-snap
+SNAP_MNT=$RUN/snap
+WORK_MNT=$RUN/work
+LEDGER=$STATE/uploaded
+LOG=$STATE/log
+BLE_KEY=$STATE/ble/private.pem
+
+log() {
+  local line
+  line="$(date '+%F %T') $*"
+  echo "$line" >&2
+  if [ -d "$STATE" ]; then
+    echo "$line" >> "$LOG"
+    if [ "$(stat -c %s "$LOG")" -gt 1000000 ]; then
+      tail -n 3000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+    fi
+  fi
+}
+
+die() {
+  log "error: $*"
+  exit 1
+}
+
+notify() {
+  [ -n "$NOTIFY_URL" ] || return 0
+  curl -fsS -m 15 -d "$*" "$NOTIFY_URL" > /dev/null 2>&1 || log "notify failed"
+}
+
+bytes() {
+  numfmt --from=iec "${1%B}"
+}
+
+drive_size() {
+  case $1 in
+    cam) echo "$CAM_SIZE" ;;
+    lightshow) echo "$LIGHTSHOW_SIZE" ;;
+    boombox) echo "$BOOMBOX_SIZE" ;;
+    music) echo "$MUSIC_SIZE" ;;
+  esac
+}
+
+drives() {
+  local d
+  for d in cam lightshow boombox music; do
+    if [ "$(drive_size "$d")" != 0 ]; then
+      echo "$d"
+    fi
+  done
+}
+
+content_drives() {
+  drives | grep -v '^cam$' || true
+}
+
+img() {
+  echo "$STATE/$1.img"
+}
+
+# prints the loop device of the image's first partition; detach with ${part%p1}
+attach_part() {
+  local loop
+  loop=$(losetup -f --show -P "$1") || return 1
+  udevadm settle
+  if [ ! -b "${loop}p1" ]; then
+    losetup -d "$loop"
+    log "no partition in $1"
+    return 1
+  fi
+  echo "${loop}p1"
+}
+
+fsck_part() {
+  local out rc=0
+  out=$(fsck.exfat -p "$1" 2>&1) || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    log "fsck $2: exit $rc: $(echo "$out" | tail -n 3 | tr '\n' ' ')"
+  elif [ "$rc" = 1 ]; then
+    log "fsck $2: repaired"
+  fi
+}
+
+# mount_image <drive> <ro|rw>: fsck, then mount at $WORK_MNT
+mount_image() {
+  local part
+  part=$(attach_part "$(img "$1")") || return 1
+  fsck_part "$part" "$1"
+  if ! mount -t exfat -o "$2" "$part" "$WORK_MNT"; then
+    losetup -d "${part%p1}"
+    log "could not mount the $1 drive"
+    return 1
+  fi
+}
+
+umount_image() {
+  local part
+  part=$(findmnt -n -o SOURCE "$WORK_MNT") || return 0
+  umount "$WORK_MNT"
+  losetup -d "${part%p1}"
+}
+
+fsck_image() {
+  local part
+  part=$(attach_part "$(img "$1")") || return 1
+  fsck_part "$part" "$1"
+  losetup -d "${part%p1}"
+}
+
+create_image() {
+  local name=$1 file part
+  file=$(img "$name")
+  [ -e "$file" ] && return 0
+  log "creating $file ($(drive_size "$name"))"
+  fallocate -l "$(bytes "$(drive_size "$name")")" "$file"
+  echo 'start=2048, type=7' | sfdisk -q "$file"
+  part=$(attach_part "$file")
+  mkfs.exfat -L "${name^^}" "$part" > /dev/null
+  losetup -d "${part%p1}"
+}
+
+# items to archive, named as on the archive remote: SavedClips/<event>,
+# SentryClips/<event>, TeslaTrackMode/<file>
+list_items() {
+  local root=$1 cat
+  for cat in SavedClips SentryClips; do
+    if [ -d "$root/TeslaCam/$cat" ]; then
+      find "$root/TeslaCam/$cat" -mindepth 1 -maxdepth 1 -type d -printf "$cat/%f\n"
+    fi
+  done
+  if [ "$ARCHIVE_TRACKMODE" = yes ] && [ -d "$root/TeslaTrackMode" ]; then
+    find "$root/TeslaTrackMode" -mindepth 1 -maxdepth 1 -type f -printf 'TeslaTrackMode/%f\n'
+  fi
+}
+
+item_path() {
+  case $2 in
+    TeslaTrackMode/*) echo "$1/$2" ;;
+    *) echo "$1/TeslaCam/$2" ;;
+  esac
+}
+
+# file count and total size; an event that grew after its upload is uploaded again
+signature() {
+  find "$1" -type f -printf '%s\n' | awk '{ n++; s += $1 } END { print n + 0 ":" s + 0 }'
+}
+
+declare -A UPLOADED=()
+
+ledger_load() {
+  local key sig
+  UPLOADED=()
+  [ -r "$LEDGER" ] || return 0
+  while IFS=$'\t' read -r key sig; do
+    UPLOADED[$key]=$sig
+  done < "$LEDGER"
+}
+
+ledger_save() {
+  local key
+  for key in "${!UPLOADED[@]}"; do
+    printf '%s\t%s\n' "$key" "${UPLOADED[$key]}"
+  done | sort > "$LEDGER.tmp"
+  mv "$LEDGER.tmp" "$LEDGER"
+}
+
+# delete the oldest already-uploaded items until MIN_FREE is free
+prune() {
+  local root=$1 min free key path
+  min=$(bytes "$MIN_FREE")
+  free=$(df --output=avail -B1 "$root" | tail -n 1)
+  [ "$free" -lt "$min" ] || return 0
+  ledger_load
+  while read -r key; do
+    [ "$free" -lt "$min" ] || break
+    path=$(item_path "$root" "$key")
+    if [ "${UPLOADED[$key]:-}" = "$(signature "$path")" ]; then
+      rm -rf "$path"
+      unset "UPLOADED[$key]"
+      log "pruned $key"
+      free=$(df --output=avail -B1 "$root" | tail -n 1)
+    fi
+  done < <(list_items "$root" | awk -F/ '{ print $2 "\t" $0 }' | sort | cut -f2)
+  ledger_save
+  if [ "$free" -lt "$min" ]; then
+    log "cam drive has $(numfmt --to=iec "$free") free and nothing uploaded left to prune"
+  fi
+}
+
+cam_attach() {
+  local loop
+  modprobe dm-snapshot
+  loop=$(losetup -f --show --direct-io=on "$(img cam)")
+  echo "$loop" > "$RUN/cam.loop"
+  dmsetup create "$CAM_DM" --table "0 $(blockdev --getsz "$loop") snapshot-origin $loop"
+}
+
+cam_detach() {
+  if dmsetup info "$CAM_DM" > /dev/null 2>&1; then
+    dmsetup remove "$CAM_DM"
+  fi
+  if [ -s "$RUN/cam.loop" ]; then
+    losetup -d "$(cat "$RUN/cam.loop")" 2> /dev/null || true
+    rm -f "$RUN/cam.loop"
+  fi
+}
+
+# a point-in-time copy of the cam drive as the car sees it right now; the car
+# keeps writing to the origin and the old blocks go to the cow file
+snapshot_take() {
+  local base cow start part
+  base=$(cat "$RUN/cam.loop") || return 1
+  rm -f "$STATE/cow"
+  truncate -s "$COW_SIZE" "$STATE/cow"
+  cow=$(losetup -f --show "$STATE/cow") || return 1
+  echo "$cow" > "$RUN/cow.loop"
+  sync
+  dmsetup suspend "$CAM_DM" || return 1
+  if ! dmsetup create "$SNAP_DM" --table "0 $(blockdev --getsz "$base") snapshot $base $cow N 8"; then
+    dmsetup resume "$CAM_DM"
+    return 1
+  fi
+  dmsetup resume "$CAM_DM"
+  start=$(partx -g -o START -n 1 "/dev/mapper/$SNAP_DM" | tr -d ' ')
+  [ -n "$start" ] || return 1
+  part=$(losetup -f --show -o $((start * 512)) "/dev/mapper/$SNAP_DM") || return 1
+  echo "$part" > "$RUN/snap.loop"
+  fsck_part "$part" snapshot
+  mount -t exfat -o ro "$part" "$SNAP_MNT"
+}
+
+snapshot_drop() {
+  if mountpoint -q "$SNAP_MNT"; then
+    umount "$SNAP_MNT"
+  fi
+  if [ -s "$RUN/snap.loop" ]; then
+    losetup -d "$(cat "$RUN/snap.loop")" 2> /dev/null || true
+    rm -f "$RUN/snap.loop"
+  fi
+  if dmsetup info "$SNAP_DM" > /dev/null 2>&1; then
+    dmsetup suspend "$CAM_DM" 2> /dev/null || true
+    dmsetup remove "$SNAP_DM" || true
+    dmsetup resume "$CAM_DM" 2> /dev/null || true
+  fi
+  if [ -s "$RUN/cow.loop" ]; then
+    losetup -d "$(cat "$RUN/cow.loop")" 2> /dev/null || true
+    rm -f "$RUN/cow.loop"
+  fi
+  rm -f "$STATE/cow"
+}
+
+gadget_bind() {
+  local udc
+  udc=$(find /sys/class/udc -mindepth 1 -maxdepth 1 -printf '%f\n' | head -n 1)
+  [ -n "$udc" ] || die "no USB device controller, is dtoverlay=dwc2 set?"
+  echo "$udc" > "$GADGET/UDC"
+  log "drives connected: $(drives | tr '\n' ' ')"
+}
+
+gadget_up() {
+  local lun=0 d file
+  if [ -d "$GADGET" ]; then
+    [ -n "$(cat "$GADGET/UDC")" ] || gadget_bind
+    return 0
+  fi
+  modprobe libcomposite
+  mkdir -p "$GADGET/strings/0x409" "$GADGET/configs/c.1/strings/0x409" "$GADGET/functions/mass_storage.0"
+  echo 0x1d6b > "$GADGET/idVendor"
+  echo 0x0104 > "$GADGET/idProduct"
+  echo 0x0100 > "$GADGET/bcdDevice"
+  echo 0x0200 > "$GADGET/bcdUSB"
+  sha256sum /etc/machine-id | cut -c1-16 > "$GADGET/strings/0x409/serialnumber"
+  echo teslausb-lite > "$GADGET/strings/0x409/manufacturer"
+  echo "teslausb-lite drives" > "$GADGET/strings/0x409/product"
+  echo storage > "$GADGET/configs/c.1/strings/0x409/configuration"
+  echo 500 > "$GADGET/configs/c.1/MaxPower"
+  for d in $(drives); do
+    if [ "$d" = cam ]; then
+      file=/dev/mapper/$CAM_DM
+    else
+      file=$(img "$d")
+    fi
+    mkdir -p "$GADGET/functions/mass_storage.0/lun.$lun"
+    echo "$file" > "$GADGET/functions/mass_storage.0/lun.$lun/file"
+    printf '%-8s%-16s' teslausb "lite ${d^^}" > "$GADGET/functions/mass_storage.0/lun.$lun/inquiry_string"
+    lun=$((lun + 1))
+  done
+  ln -s "$GADGET/functions/mass_storage.0" "$GADGET/configs/c.1/"
+  gadget_bind
+}
+
+gadget_down() {
+  local lun
+  [ -d "$GADGET" ] || return 0
+  echo > "$GADGET/UDC" 2> /dev/null || true
+  if [ -n "$(cat "$GADGET/UDC")" ]; then
+    log "could not disconnect the drives"
+    return 1
+  fi
+  rm -f "$GADGET/configs/c.1/mass_storage.0"
+  for lun in "$GADGET"/functions/mass_storage.0/lun.*; do
+    [ "${lun##*.}" = 0 ] || rmdir "$lun"
+  done
+  rmdir "$GADGET/functions/mass_storage.0" "$GADGET/configs/c.1/strings/0x409" \
+    "$GADGET/configs/c.1" "$GADGET/strings/0x409" "$GADGET"
+  log "drives disconnected"
+}
+
+# bytes the gadget has written on the car's behalf since it came up
+gadget_written() {
+  local pid
+  pid=$(pgrep -x file-storage | head -n 1) || true
+  if [ -z "$pid" ]; then
+    echo 0
+    return
+  fi
+  awk '/^write_bytes/ { print $2 }' "/proc/$pid/io"
+}
+
+wait_car_idle() {
+  local i before after
+  for i in 1 2 3; do
+    before=$(gadget_written)
+    sleep 20
+    after=$(gadget_written)
+    [ $((after - before)) -gt 65536 ] || return 0
+    log "car is writing, waiting ($i)"
+  done
+  return 1
+}
+
+current_ssid() {
+  iw dev "$WIFI_IFACE" link 2> /dev/null | sed -n 's/^[[:space:]]*SSID: //p'
+}
+
+on_home_network() {
+  if [ -n "$HOME_SSID" ] && [ "$(current_ssid)" != "$HOME_SSID" ]; then
+    return 1
+  fi
+  ip route show default | grep -q .
+}
+
+remote_reachable() {
+  timeout 60 rclone lsf --max-depth 1 "${ARCHIVE_REMOTE%%:*}:" > /dev/null 2>&1
+}
+
+wait_until_home() {
+  while true; do
+    if on_home_network; then
+      if remote_reachable; then
+        return 0
+      fi
+      sleep 60
+    else
+      sleep 15
+    fi
+  done
+}
+
+sleep_while_home() {
+  local until=$(($(date +%s) + $1))
+  while [ "$(date +%s)" -lt "$until" ]; do
+    on_home_network || return 1
+    sleep 15
+  done
+}
+
+ble() {
+  timeout 90 tesla-control -ble -vin "$TESLA_VIN" -key-file "$BLE_KEY" "$@"
+}
+
+# repeated every five minutes at most, in case the car switched it off
+keep_awake_on() {
+  [ "$KEEP_AWAKE" = yes ] || return 0
+  if [ -e "$STATE/awake" ] && [ $(($(date +%s) - $(stat -c %Y "$STATE/awake"))) -lt 300 ]; then
+    return 0
+  fi
+  if ble "$KEEP_AWAKE_COMMAND" on > /dev/null 2>&1 ||
+    { ble wake > /dev/null 2>&1 && ble "$KEEP_AWAKE_COMMAND" on > /dev/null 2>&1; }; then
+    [ -e "$STATE/awake" ] || log "keeping the car awake ($KEEP_AWAKE_COMMAND on)"
+    touch "$STATE/awake"
+  else
+    log "could not keep the car awake"
+  fi
+}
+
+keep_awake_off() {
+  [ -e "$STATE/awake" ] || return 0
+  if ble "$KEEP_AWAKE_COMMAND" off > /dev/null 2>&1; then
+    rm -f "$STATE/awake"
+    log "the car may sleep again ($KEEP_AWAKE_COMMAND off)"
+  else
+    log "could not switch $KEEP_AWAKE_COMMAND off, retrying later"
+  fi
+}
+
+# upload into .partial first so the archive only ever holds complete items;
+# --compare-dest skips files an earlier upload of the same event already has
+upload_item() {
+  local key=$1 src
+  src=$(item_path "$SNAP_MNT" "$key")
+  if [ -d "$src" ]; then
+    rclone copy "$src" "$ARCHIVE_REMOTE/.partial/$key" --compare-dest "$ARCHIVE_REMOTE/$key" \
+      "${RCLONE_FLAGS[@]}" &&
+      rclone move "$ARCHIVE_REMOTE/.partial/$key" "$ARCHIVE_REMOTE/$key" --delete-empty-src-dirs \
+        "${RCLONE_FLAGS[@]}"
+  else
+    rclone copyto "$src" "$ARCHIVE_REMOTE/.partial/$key" "${RCLONE_FLAGS[@]}" &&
+      rclone moveto "$ARCHIVE_REMOTE/.partial/$key" "$ARCHIVE_REMOTE/$key" "${RCLONE_FLAGS[@]}"
+  fi
+}
+
+# returns 0 when nothing is left to upload
+archive_cycle() {
+  local key sig ok=0 failed=0
+  local -A seen=() pending=()
+  if ! snapshot_take; then
+    log "snapshot failed"
+    snapshot_drop
+    return 1
+  fi
+  ledger_load
+  while read -r key; do
+    sig=$(signature "$(item_path "$SNAP_MNT" "$key")")
+    seen[$key]=1
+    [ "${UPLOADED[$key]:-}" = "$sig" ] || pending[$key]=$sig
+  done < <(list_items "$SNAP_MNT")
+  # an item deleted in the car before this snapshot is forgotten, never uploaded
+  for key in "${!UPLOADED[@]}"; do
+    [ -n "${seen[$key]:-}" ] || unset "UPLOADED[$key]"
+  done
+  ledger_save
+  if [ ${#pending[@]} -gt 0 ]; then
+    log "${#pending[@]} item(s) to upload"
+    keep_awake_on
+  fi
+  while read -r key; do
+    [ -n "$key" ] || continue
+    if ! on_home_network; then
+      log "left home during upload"
+      failed=$((failed + 1))
+      break
+    fi
+    if upload_item "$key" >> "$LOG" 2>&1; then
+      UPLOADED[$key]=${pending[$key]}
+      ledger_save
+      ok=$((ok + 1))
+    else
+      log "upload failed: $key"
+      failed=$((failed + 1))
+    fi
+  done < <(printf '%s\n' "${!pending[@]}" | sort)
+  snapshot_drop
+  if [ "$failed" -gt 0 ]; then
+    touch "$STATE/partial"
+  elif [ ${#pending[@]} -gt 0 ] || [ -e "$STATE/partial" ]; then
+    rclone purge "$ARCHIVE_REMOTE/.partial" > /dev/null 2>&1 || true
+    rm -f "$STATE/partial"
+  fi
+  if [ "$ok" -gt 0 ] || [ "$failed" -gt 0 ]; then
+    log "uploaded $ok item(s), $failed failed"
+    notify "teslausb-lite: uploaded $ok item(s), $failed failed"
+  fi
+  [ "$failed" = 0 ]
+}
+
+content_filters() {
+  local -n out=$2
+  case $1 in
+    lightshow) out=(--filter '+ /LightShow/**' --filter '+ /Wraps/**' --filter '+ /LicensePlate/**') ;;
+    boombox) out=(--filter '+ /Boombox/**') ;;
+    music) out=(--filter '+ /Music/**') ;;
+  esac
+  if [ "$LOCKCHIME_DRIVE" = "$1" ]; then
+    out+=(--filter '+ /LockChime.wav')
+  fi
+  out+=(--filter '- **')
+}
+
+content_hash() {
+  find "$STATE/content/$1" -type f -printf '%P\t%s\t%T@\n' | sort | md5sum | cut -d' ' -f1
+}
+
+# true when downloaded content differs from what the drive holds; a drive
+# never updated holds nothing, which hashes like an empty download
+content_stale() {
+  local applied
+  [ -e "$STATE/content/$1.fetched" ] || return 1
+  applied=$(cat "$STATE/content/$1.applied" 2> /dev/null) || applied=$(md5sum < /dev/null | cut -d' ' -f1)
+  [ "$(content_hash "$1")" != "$applied" ]
+}
+
+content_fetch() {
+  local d filters=()
+  [ -n "$CONTENT_REMOTE" ] || return 0
+  for d in $(content_drives); do
+    content_filters "$d" filters
+    mkdir -p "$STATE/content/$d"
+    if rclone sync "$CONTENT_REMOTE" "$STATE/content/$d" "${filters[@]}" "${RCLONE_FLAGS[@]}" >> "$LOG" 2>&1; then
+      touch "$STATE/content/$d.fetched"
+    else
+      log "content download failed for the $d drive"
+    fi
+  done
+}
+
+# write downloaded content into a drive image that the car does not see
+content_apply() {
+  local d=$1 filters=()
+  content_filters "$d" filters
+  mount_image "$d" rw || return 1
+  if rclone sync "$STATE/content/$d" "$WORK_MNT" "${filters[@]}" --modify-window 2s >> "$LOG" 2>&1; then
+    content_hash "$d" > "$STATE/content/$d.applied"
+    log "updated the $d drive"
+  else
+    log "could not update the $d drive"
+  fi
+  sync
+  umount_image
+}
+
+content_cycle() {
+  local d stale=()
+  content_fetch
+  for d in $(content_drives); do
+    if content_stale "$d"; then
+      stale+=("$d")
+    fi
+  done
+  [ ${#stale[@]} -gt 0 ] || return 0
+  if ! wait_car_idle; then
+    log "the car is busy, content update postponed"
+    return 1
+  fi
+  gadget_down || return 1
+  for d in "${stale[@]}"; do
+    content_apply "$d"
+  done
+  gadget_up
+}
+
+maintenance() {
+  local d
+  for d in $(drives); do
+    create_image "$d" || return 1
+  done
+  mount_image cam rw || return 1
+  mkdir -p "$WORK_MNT/TeslaCam"
+  prune "$WORK_MNT"
+  umount_image
+  for d in $(content_drives); do
+    if content_stale "$d"; then
+      content_apply "$d"
+    else
+      fsck_image "$d"
+    fi
+  done
+}
+
+boot() {
+  mkdir -p "$STATE" "$RUN" "$SNAP_MNT" "$WORK_MNT"
+  [ -n "$ARCHIVE_REMOTE" ] || die "ARCHIVE_REMOTE is not set in $CONF"
+  sysctl -q -w vm.dirty_background_bytes=65536 vm.dirty_ratio=80
+  gadget_down
+  snapshot_drop
+  cam_detach
+  umount_image
+  maintenance || log "boot maintenance failed"
+  cam_attach
+  gadget_up
+}
+
+cmd_run() {
+  local io last_io=none arrived quiet
+  boot
+  while true; do
+    wait_until_home
+    log "home network up"
+    arrived=$(date +%s)
+    keep_awake_on
+    if ! sleep_while_home "$ARRIVAL_DELAY"; then
+      keep_awake_off
+      continue
+    fi
+    while true; do
+      quiet=yes
+      io=$(gadget_written)
+      if [ "$io" != "$last_io" ]; then
+        if archive_cycle; then
+          last_io=$io
+        else
+          quiet=no
+        fi
+      fi
+      content_cycle || quiet=no
+      if [ "$quiet" = yes ] || [ $(($(date +%s) - arrived)) -gt "$KEEP_AWAKE_MAX" ]; then
+        keep_awake_off
+      else
+        keep_awake_on
+      fi
+      sleep_while_home "$RESCAN_INTERVAL" || break
+    done
+    log "left home"
+    keep_awake_off
+  done
+}
+
+cmd_stop() {
+  gadget_down || true
+  snapshot_drop
+  cam_detach
+}
+
+cmd_status() {
+  local d note
+  echo "wifi:     $(current_ssid)"
+  echo "gadget:   $([ -d "$GADGET" ] && cat "$GADGET/UDC" || echo down)"
+  for d in $(drives); do
+    note=
+    if content_stale "$d"; then
+      note="(content update pending)"
+    fi
+    printf '  %-10s %s %s\n' "$d" "$(du -h --apparent-size "$(img "$d")" 2> /dev/null | cut -f1)" "$note"
+  done
+  echo "uploaded: $(wc -l < "$LEDGER" 2> /dev/null || echo 0) item(s) on the car are in the archive"
+  echo "awake:    $([ -e "$STATE/awake" ] && echo "keeping the car awake" || echo no)"
+  echo
+  tail -n 15 "$LOG" 2> /dev/null || true
+}
+
+cmd_ble_keygen() {
+  mkdir -p "$STATE/ble"
+  chmod 700 "$STATE/ble"
+  [ ! -e "$BLE_KEY" ] || die "$BLE_KEY already exists"
+  openssl ecparam -genkey -name prime256v1 -noout -out "$BLE_KEY"
+  chmod 600 "$BLE_KEY"
+  openssl ec -in "$BLE_KEY" -pubout -out "$STATE/ble/public.pem" 2> /dev/null
+  echo "created $STATE/ble/public.pem"
+}
+
+cmd_ble_pair() {
+  local role=${1:-charging_manager}
+  [ -n "$TESLA_VIN" ] || die "TESLA_VIN is not set in $CONF"
+  [ -e "$STATE/ble/public.pem" ] || die "run '$0 ble-keygen' first"
+  echo "sit in the car with the key card ready and tap it on the console when the car asks"
+  tesla-control -ble -vin "$TESLA_VIN" add-key-request "$STATE/ble/public.pem" "$role" cloud_key
+}
+
+cmd_ble_test() {
+  [ -n "$TESLA_VIN" ] || die "TESLA_VIN is not set in $CONF"
+  ble "$KEEP_AWAKE_COMMAND" on
+  sleep 5
+  ble "$KEEP_AWAKE_COMMAND" off
+  echo ok
+}
+
+usage() {
+  cat <<EOF
+usage: $0 <command>
+  run              connect the drives and archive when home (the service runs this)
+  stop             disconnect the drives
+  status           drives, upload state and the latest log lines
+  ble-keygen       create the key used to keep the car awake over bluetooth
+  ble-pair [role]  enroll the key in the car (default role charging_manager)
+  ble-test         switch $KEEP_AWAKE_COMMAND on and off once
+EOF
+}
+
+[ "$(id -u)" = 0 ] || die "must run as root"
+case ${1:-} in
+  run) cmd_run ;;
+  stop) cmd_stop ;;
+  status) cmd_status ;;
+  ble-keygen) cmd_ble_keygen ;;
+  ble-pair) shift; cmd_ble_pair "$@" ;;
+  ble-test) cmd_ble_test ;;
+  *) usage; exit 2 ;;
+esac
