@@ -374,8 +374,9 @@ wait_car_idle() {
   return 1
 }
 
+# iw prints every byte outside printable ascii as \xNN, so å arrives as \xc3\xa5
 current_ssid() {
-  iw dev "$WIFI_IFACE" link 2> /dev/null | sed -n 's/^[[:space:]]*SSID: //p'
+  printf '%b' "$(iw dev "$WIFI_IFACE" link 2> /dev/null | sed -n 's/^[[:space:]]*SSID: //p')"
 }
 
 on_home_network() {
