@@ -68,6 +68,14 @@ bytes() {
   numfmt --from=iec "${1%B}"
 }
 
+# seconds since boot; the pi has no clock of its own, so the date can jump
+# by days when it reaches the network
+uptime_s() {
+  local up
+  read -r up _ < /proc/uptime
+  echo "${up%.*}"
+}
+
 drive_size() {
   case $1 in
     cam) echo "$CAM_SIZE" ;;
@@ -394,8 +402,8 @@ wait_until_home() {
 }
 
 sleep_while_home() {
-  local until=$(($(date +%s) + $1))
-  while [ "$(date +%s)" -lt "$until" ]; do
+  local until=$(($(uptime_s) + $1))
+  while [ "$(uptime_s)" -lt "$until" ]; do
     on_home_network || return 1
     sleep 15
   done
@@ -408,13 +416,15 @@ ble() {
 # repeated every five minutes at most, in case the car switched it off
 keep_awake_on() {
   [ "$KEEP_AWAKE" = yes ] || return 0
-  if [ -e "$STATE/awake" ] && [ $(($(date +%s) - $(stat -c %Y "$STATE/awake"))) -lt 300 ]; then
+  if [ -e "$STATE/awake" ] && [ -s "$RUN/awake.at" ] &&
+    [ $(($(uptime_s) - $(cat "$RUN/awake.at"))) -lt 300 ]; then
     return 0
   fi
   if ble "$KEEP_AWAKE_COMMAND" on > /dev/null 2>&1 ||
     { ble wake > /dev/null 2>&1 && ble "$KEEP_AWAKE_COMMAND" on > /dev/null 2>&1; }; then
     [ -e "$STATE/awake" ] || log "keeping the car awake ($KEEP_AWAKE_COMMAND on)"
     touch "$STATE/awake"
+    uptime_s > "$RUN/awake.at"
   else
     log "could not keep the car awake"
   fi
@@ -423,7 +433,7 @@ keep_awake_on() {
 keep_awake_off() {
   [ -e "$STATE/awake" ] || return 0
   if ble "$KEEP_AWAKE_COMMAND" off > /dev/null 2>&1; then
-    rm -f "$STATE/awake"
+    rm -f "$STATE/awake" "$RUN/awake.at"
     log "the car may sleep again ($KEEP_AWAKE_COMMAND off)"
   else
     log "could not switch $KEEP_AWAKE_COMMAND off, retrying later"
@@ -612,7 +622,7 @@ cmd_run() {
   while true; do
     wait_until_home
     log "home network up"
-    arrived=$(date +%s)
+    arrived=$(uptime_s)
     keep_awake_on
     if ! sleep_while_home "$ARRIVAL_DELAY"; then
       keep_awake_off
@@ -629,7 +639,7 @@ cmd_run() {
         fi
       fi
       content_cycle || quiet=no
-      if [ "$quiet" = yes ] || [ $(($(date +%s) - arrived)) -gt "$KEEP_AWAKE_MAX" ]; then
+      if [ "$quiet" = yes ] || [ $(($(uptime_s) - arrived)) -gt "$KEEP_AWAKE_MAX" ]; then
         keep_awake_off
       else
         keep_awake_on
