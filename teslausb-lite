@@ -41,6 +41,7 @@ WORK_MNT=$RUN/work
 LEDGER=$STATE/uploaded
 LOG=$STATE/log
 BLE_KEY=$STATE/ble/private.pem
+AWAKE_UNTIL=0
 
 log() {
   local line
@@ -413,9 +414,11 @@ ble() {
   timeout 90 tesla-control -ble -vin "$TESLA_VIN" -key-file "$BLE_KEY" "$@"
 }
 
-# repeated every five minutes at most, in case the car switched it off
+# repeated every five minutes at most, in case the car switched it off, and
+# not at all once KEEP_AWAKE_MAX has passed since arriving home
 keep_awake_on() {
   [ "$KEEP_AWAKE" = yes ] || return 0
+  [ "$(uptime_s)" -lt "$AWAKE_UNTIL" ] || return 0
   if [ -e "$STATE/awake" ] && [ -s "$RUN/awake.at" ] &&
     [ $(($(uptime_s) - $(cat "$RUN/awake.at"))) -lt 300 ]; then
     return 0
@@ -617,12 +620,12 @@ boot() {
 }
 
 cmd_run() {
-  local io last_io=none arrived quiet
+  local io last_io=none quiet
   boot
   while true; do
     wait_until_home
     log "home network up"
-    arrived=$(uptime_s)
+    AWAKE_UNTIL=$(($(uptime_s) + KEEP_AWAKE_MAX))
     keep_awake_on
     if ! sleep_while_home "$ARRIVAL_DELAY"; then
       keep_awake_off
@@ -639,7 +642,7 @@ cmd_run() {
         fi
       fi
       content_cycle || quiet=no
-      if [ "$quiet" = yes ] || [ $(($(uptime_s) - arrived)) -gt "$KEEP_AWAKE_MAX" ]; then
+      if [ "$quiet" = yes ] || [ "$(uptime_s)" -ge "$AWAKE_UNTIL" ]; then
         keep_awake_off
       else
         keep_awake_on
