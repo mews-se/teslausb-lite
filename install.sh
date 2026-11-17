@@ -75,7 +75,8 @@ printf '[Journal]\nStorage=volatile\nRuntimeMaxUse=16M\n' > /etc/systemd/journal
 
 reboot=no
 config=/boot/firmware/config.txt
-if [ -e "$config" ] && ! grep -q '^dtoverlay=dwc2' "$config"; then
+# only this exact line: the stock file has dtoverlay=dwc2,dr_mode=host under [cm5]
+if [ -e "$config" ] && ! grep -qx 'dtoverlay=dwc2' "$config"; then
   printf '\n[all]\ndtoverlay=dwc2\n' >> "$config"
   reboot=yes
 fi
