@@ -35,13 +35,20 @@ install_rclone() {
 }
 
 install_tesla_control() {
-  local tmp had_go=yes
+  local tmp dir had_go=yes
   dpkg -s golang-go > /dev/null 2>&1 || had_go=no
   apt install -y golang-go bluez
   apt install -y pi-bluetooth 2> /dev/null || true
-  tmp=$(mktemp -d)
-  GOPATH=$tmp/go GOCACHE=$tmp/cache GOBIN=/usr/local/bin GOTOOLCHAIN=local \
-    go install github.com/teslamotors/vehicle-command/cmd/tesla-control@v0.4.1
+  # on disk, /tmp is in memory on trixie and the build cache is large
+  tmp=$(mktemp -d -p /var/tmp)
+  # go install pkg@version refuses a module with replace directives, so fetch
+  # the module (checked against go.sum as usual) and build inside it
+  dir=$(GOPATH=$tmp/go GOFLAGS=-modcacherw GOTOOLCHAIN=local \
+    go mod download -json github.com/teslamotors/vehicle-command@v0.4.1 |
+    sed -n 's/^[[:space:]]*"Dir": "\(.*\)",$/\1/p')
+  [ -d "$dir" ] || { echo "could not download vehicle-command" >&2; exit 1; }
+  (cd "$dir" && GOPATH=$tmp/go GOCACHE=$tmp/cache GOFLAGS=-modcacherw GOTOOLCHAIN=local \
+    go build -trimpath -o /usr/local/bin/tesla-control ./cmd/tesla-control)
   rm -rf "$tmp"
   if [ "$had_go" = no ]; then
     apt purge -y golang-go
