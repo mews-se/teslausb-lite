@@ -25,7 +25,8 @@ KEEP_AWAKE=no
 KEEP_AWAKE_COMMAND=keep-accessory-power
 KEEP_AWAKE_MAX=7200
 TESLA_VIN=
-NOTIFY_URL=
+PUSHOVER_USER_KEY=
+PUSHOVER_APP_KEY=
 RCLONE_FLAGS=(--transfers 2 --retries 3 --low-level-retries 10)
 
 if [ -r "$CONF" ]; then
@@ -42,6 +43,7 @@ LEDGER=$STATE/uploaded
 LOG=$STATE/log
 BLE_KEY=$STATE/ble/private.pem
 AWAKE_UNTIL=0
+NOTIFIED=
 
 log() {
   local line
@@ -61,12 +63,27 @@ die() {
 }
 
 notify() {
-  [ -n "$NOTIFY_URL" ] || return 0
-  curl -fsS -m 15 -d "$*" "$NOTIFY_URL" > /dev/null 2>&1 || log "notify failed"
+  local code
+  [ -n "$PUSHOVER_USER_KEY" ] && [ -n "$PUSHOVER_APP_KEY" ] || return 0
+  code=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' \
+    --form-string "token=$PUSHOVER_APP_KEY" --form-string "user=$PUSHOVER_USER_KEY" \
+    --form-string "title=teslausb-lite" --form-string "message=$*" \
+    https://api.pushover.net/1/messages.json 2> /dev/null) || true
+  [ "$code" = 200 ] || log "pushover message not sent (http $code)"
 }
 
 bytes() {
   numfmt --from=iec "${1%B}"
+}
+
+duration() {
+  if [ "$1" -ge 3600 ]; then
+    printf '%dh%02dm\n' $(($1 / 3600)) $(($1 % 3600 / 60))
+  elif [ "$1" -ge 60 ]; then
+    printf '%dm%02ds\n' $(($1 / 60)) $(($1 % 60))
+  else
+    printf '%ds\n' "$1"
+  fi
 }
 
 # seconds since boot; the pi has no clock of its own, so the date can jump
@@ -460,9 +477,10 @@ upload_item() {
   fi
 }
 
-# returns 0 when nothing is left to upload
+# returns 0 when nothing is left to upload; a retry of the same items after a
+# failure sends no message until they are up
 archive_cycle() {
-  local key sig ok=0 failed=0
+  local key sig ok=0 failed=0 files=0 size=0 summary='' started
   local -A seen=() pending=()
   if ! snapshot_take; then
     log "snapshot failed"
@@ -482,8 +500,17 @@ archive_cycle() {
   ledger_save
   if [ ${#pending[@]} -gt 0 ]; then
     log "${#pending[@]} item(s) to upload"
+    for key in "${!pending[@]}"; do
+      files=$((files + ${pending[$key]%:*}))
+      size=$((size + ${pending[$key]#*:}))
+    done
+    summary="${#pending[@]} event(s), $files files, $(numfmt --to=iec "$size")"
+    if [ "$summary" != "$NOTIFIED" ]; then
+      notify "uploading $summary"
+    fi
     keep_awake_on
   fi
+  started=$(uptime_s)
   while read -r key; do
     [ -n "$key" ] || continue
     if ! on_home_network; then
@@ -509,7 +536,13 @@ archive_cycle() {
   fi
   if [ "$ok" -gt 0 ] || [ "$failed" -gt 0 ]; then
     log "uploaded $ok item(s), $failed failed"
-    notify "teslausb-lite: uploaded $ok item(s), $failed failed"
+  fi
+  if [ "$failed" = 0 ] && [ "$ok" -gt 0 ]; then
+    notify "uploaded $ok event(s) in $(duration $(($(uptime_s) - started)))"
+    NOTIFIED=
+  elif [ "$failed" -gt 0 ] && [ "$summary" != "$NOTIFIED" ]; then
+    notify "uploaded $ok of ${#pending[@]} event(s), the rest is retried later"
+    NOTIFIED=$summary
   fi
   [ "$failed" = 0 ]
 }
@@ -556,7 +589,7 @@ content_fetch() {
 
 # write downloaded content into a drive image that the car does not see
 content_apply() {
-  local d=$1 filters=()
+  local d=$1 filters=() rc=0
   content_filters "$d" filters
   mount_image "$d" rw || return 1
   if rclone sync "$STATE/content/$d" "$WORK_MNT" "${filters[@]}" --modify-window 2s >> "$LOG" 2>&1; then
@@ -564,13 +597,15 @@ content_apply() {
     log "updated the $d drive"
   else
     log "could not update the $d drive"
+    rc=1
   fi
   sync
   umount_image
+  return $rc
 }
 
 content_cycle() {
-  local d stale=()
+  local d stale=() updated=()
   content_fetch
   for d in $(content_drives); do
     if content_stale "$d"; then
@@ -584,9 +619,14 @@ content_cycle() {
   fi
   gadget_down || return 1
   for d in "${stale[@]}"; do
-    content_apply "$d"
+    if content_apply "$d"; then
+      updated+=("$d")
+    fi
   done
   gadget_up
+  for d in "${updated[@]}"; do
+    notify "updated the $d drive"
+  done
 }
 
 maintenance() {
@@ -626,6 +666,7 @@ cmd_run() {
   while true; do
     wait_until_home
     log "home network up"
+    NOTIFIED=
     AWAKE_UNTIL=$(($(uptime_s) + KEEP_AWAKE_MAX))
     keep_awake_on
     if ! sleep_while_home "$ARRIVAL_DELAY"; then

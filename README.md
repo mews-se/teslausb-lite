@@ -14,8 +14,8 @@ Not affiliated with or endorsed by Tesla, Inc.
 - rclone is the only archive backend (OneDrive, Google Drive, SMB, SFTP and so on).
 - The light show, wrap, license plate, lock chime, boombox and music drives are filled from a
   cloud folder instead of a web page.
-- No web server, Samba, access point, notification services or prebuilt image. One script, one
-  service and one config file.
+- No web server, Samba, access point or prebuilt image, and Pushover is the only notification
+  service. One script, one service and one config file.
 - Runs on stock Raspberry Pi OS Lite (trixie) without repartitioning the card. The snapshot is a
   device-mapper snapshot of the cam image.
 
@@ -93,6 +93,13 @@ images are updated.
 4. While home it looks again every `RESCAN_INTERVAL` seconds if the car has written anything.
 
 State lives in `/var/lib/teslausb-lite`: the images, `uploaded` (what is in the archive) and `log`.
+
+## Notifications
+
+With `PUSHOVER_USER_KEY` and `PUSHOVER_APP_KEY` set, the Pi sends a Pushover message when an
+upload starts (events, files and size), when it is done (and how long it took) and when an extra
+drive gets new content. teslausb's config uses the same two names. When an upload fails, the
+retries stay quiet until they succeed or the car comes home again.
 
 ## Keeping the car awake
 
