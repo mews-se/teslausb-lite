@@ -169,6 +169,27 @@ fsck_image() {
   losetup -d "${part%p1}"
 }
 
+# stop with a message instead of a half-made image; new images must leave
+# room for the snapshot's COW file
+check_sizes() {
+  local d cam need=0 avail
+  cam=$(bytes "$CAM_SIZE")
+  [ "$cam" -gt 0 ] || die "CAM_SIZE must not be 0"
+  if [ "$(bytes "$MIN_FREE")" -ge "$cam" ]; then
+    log "MIN_FREE ($MIN_FREE) is not below CAM_SIZE ($CAM_SIZE), so every boot deletes all uploaded clips from the car"
+  fi
+  for d in $(drives); do
+    if [ ! -e "$(img "$d")" ]; then
+      need=$((need + $(bytes "$(drive_size "$d")")))
+    fi
+  done
+  [ "$need" -gt 0 ] || return 0
+  need=$((need + $(bytes "$COW_SIZE")))
+  avail=$(df --output=avail -B1 "$STATE" | tail -n 1)
+  [ "$need" -le "$avail" ] ||
+    die "the new drive images and $COW_SIZE for snapshots need $(numfmt --to=iec "$need"), only $(numfmt --to=iec "$avail") is free; lower the sizes in $CONF"
+}
+
 create_image() {
   local name=$1 file part
   file=$(img "$name")
@@ -650,6 +671,7 @@ maintenance() {
 boot() {
   mkdir -p "$STATE" "$RUN" "$SNAP_MNT" "$WORK_MNT"
   [ -n "$ARCHIVE_REMOTE" ] || die "ARCHIVE_REMOTE is not set in $CONF"
+  check_sizes
   sysctl -q -w vm.dirty_background_bytes=65536 vm.dirty_ratio=80
   gadget_down
   snapshot_drop

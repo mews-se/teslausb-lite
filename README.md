@@ -63,6 +63,12 @@ separate drives. `LockChime.wav` goes in the root of the drive named in `LOCKCHI
 All drives are exFAT image files in `/var/lib/teslausb-lite`. To change a size, stop the service,
 delete the image and start it again; the content of that drive is lost.
 
+New images plus 8 GB for the snapshot have to fit in the free space; otherwise the service stops
+before connecting anything and `teslausb-lite status` says why. The defaults need a 128 GB card.
+On a 32 GB card something like `CAM_SIZE=16G`, `LIGHTSHOW_SIZE=256M`, `BOOMBOX_SIZE=0` and
+`MIN_FREE=4G` works. Keep `MIN_FREE` below `CAM_SIZE`, or every boot deletes all uploaded clips
+from the car.
+
 ## Content for the extra drives
 
 Point `CONTENT_REMOTE` at a folder laid out like this:
