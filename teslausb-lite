@@ -735,7 +735,7 @@ cmd_status() {
     fi
     printf '  %-10s %s %s\n' "$d" "$(du -h --apparent-size "$(img "$d")" 2> /dev/null | cut -f1)" "$note"
   done
-  echo "uploaded: $(wc -l < "$LEDGER" 2> /dev/null || echo 0) item(s) on the car are in the archive"
+  echo "uploaded: $(wc -l 2> /dev/null < "$LEDGER" || echo 0) item(s) on the car are in the archive"
   echo "awake:    $([ -e "$STATE/awake" ] && echo "keeping the car awake" || echo no)"
   echo
   tail -n 15 "$LOG" 2> /dev/null || true
