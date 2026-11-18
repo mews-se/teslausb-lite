@@ -3,7 +3,7 @@
 A small take on [teslausb](https://github.com/marcone/teslausb): a Raspberry Pi acts as the car's
 USB drives and uploads Sentry and dashcam clips with rclone once the car is home.
 
-Not affiliated with or endorsed by Tesla, Inc.
+Not part of the teslausb project, and not affiliated with or endorsed by Tesla, Inc.
 
 ## Differences from teslausb
 
