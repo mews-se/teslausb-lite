@@ -428,6 +428,19 @@ current_ssid() {
   printf '%b' "$(iw dev "$WIFI_IFACE" link 2> /dev/null | sed -n 's/^[[:space:]]*SSID: //p')"
 }
 
+# the address the internet is reached from, whatever the interface
+current_ip() {
+  ip -4 route get 1.1.1.1 2> /dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -n 1 || true
+}
+
+# "badanka, 10.0.0.42", either half alone, or nothing
+network_name() {
+  local ssid addr
+  ssid=$(current_ssid)
+  addr=$(current_ip)
+  echo "${ssid:+$ssid${addr:+, }}$addr"
+}
+
 on_home_network() {
   if [ -n "$HOME_SSID" ] && [ "$(current_ssid)" != "$HOME_SSID" ]; then
     return 1
@@ -443,7 +456,7 @@ remote_reachable() {
 # config would otherwise go unnoticed, so the first miss is logged and five
 # in a row send a message, once per visit
 wait_until_home() {
-  local ssid connected=no misses=0
+  local where connected=no misses=0
   while true; do
     if ! on_home_network; then
       connected=no
@@ -452,9 +465,9 @@ wait_until_home() {
       continue
     fi
     if [ "$connected" = no ]; then
-      ssid=$(current_ssid)
-      log "home network up${ssid:+ ($ssid)}"
-      notify "connected${ssid:+ to $ssid}"
+      where=$(network_name)
+      log "home network up${where:+ ($where)}"
+      notify "connected${where:+ to $where}"
       connected=yes
     fi
     if remote_reachable; then
