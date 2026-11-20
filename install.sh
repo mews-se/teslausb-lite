@@ -65,6 +65,7 @@ fi
 
 install -m 755 teslausb-lite /usr/local/sbin/teslausb-lite
 install -m 644 teslausb-lite.service /etc/systemd/system/teslausb-lite.service
+install -D -m 755 teslausb-lite.motd /etc/update-motd.d/20-teslausb-lite
 fresh=no
 if [ ! -e /etc/teslausb-lite.conf ]; then
   install -m 600 teslausb-lite.conf /etc/teslausb-lite.conf

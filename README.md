@@ -144,7 +144,8 @@ journalctl -u teslausb-lite
 ```
 
 `rescan` makes the Pi look for new clips and new content right away instead of at the next
-`RESCAN_INTERVAL`. The car has to be home; otherwise the request waits for the next arrival.
+`RESCAN_INTERVAL`. The car has to be home; otherwise the request waits for the next arrival. The login
+banner shows the service state, the last log line and these commands.
 
 ## Updating
 

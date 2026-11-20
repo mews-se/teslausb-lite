@@ -1,0 +1,15 @@
+#!/bin/sh
+# shown at login: the state of teslausb-lite and the commands worth knowing
+state=$(systemctl is-active teslausb-lite 2> /dev/null)
+last=$(tail -n 1 /var/lib/teslausb-lite/log 2> /dev/null)
+printf '\nteslausb-lite: %s\n' "${state:-unknown}"
+[ -z "$last" ] || printf '  last: %s\n' "$last"
+cat <<'TEXT'
+  sudo teslausb-lite status     drives, upload state and the latest log lines
+  sudo teslausb-lite rescan     look for new clips and content now
+  journalctl -fu teslausb-lite  follow the log
+  sudo teslausb-lite ble-pair   enroll the bluetooth key, then ble-test
+  config /etc/teslausb-lite.conf, state /var/lib/teslausb-lite
+  update: git pull --ff-only in the clone, sudo ./install.sh, sudo systemctl restart teslausb-lite
+
+TEXT
