@@ -17,7 +17,7 @@ BOOMBOX_SIZE=256M
 MUSIC_SIZE=0
 LOCKCHIME_DRIVE=lightshow
 ARCHIVE_TRACKMODE=no
-ARRIVAL_DELAY=120
+ARRIVAL_DELAY=15
 RESCAN_INTERVAL=900
 MIN_FREE=20G
 COW_SIZE=8G
@@ -448,7 +448,7 @@ wait_until_home() {
     if ! on_home_network; then
       connected=no
       misses=0
-      sleep 15
+      sleep 5
       continue
     fi
     if [ "$connected" = no ]; then
