@@ -135,6 +135,27 @@ sudo teslausb-lite status
 journalctl -u teslausb-lite
 ```
 
+## Updating
+
+```bash
+cd teslausb-lite
+git pull --ff-only
+sudo ./install.sh
+sudo systemctl restart teslausb-lite
+```
+
+`install.sh` can be run again at any time. It leaves `/etc/teslausb-lite.conf` alone and also updates
+rclone, which comes from rclone.org rather than from apt. The drives disconnect for a moment at the
+restart, so do it while the car is parked.
+
+Raspberry Pi OS Lite does not update itself. `sudo apt install unattended-upgrades` with its stock
+settings gives you Debian's security and point release updates, but not the kernel and firmware from
+the Raspberry Pi archive. That is a sensible split for a Pi that loses power whenever the car goes to
+sleep: an interrupted kernel upgrade can leave a card that does not boot, while an interrupted
+ordinary package is put right with `sudo dpkg --configure -a`. Leave automatic reboots off; the Pi is
+power cycled every time the car wakes up, so a new kernel is picked up on the next drive. Upgrade the
+kernel and firmware yourself with `sudo apt full-upgrade` now and then.
+
 ## Tried in a car so far
 
 On a Pi 4 the car records to the CAM drive, saves clips there and plays `LockChime.wav` from the
