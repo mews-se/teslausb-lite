@@ -439,15 +439,23 @@ remote_reachable() {
   timeout 60 rclone lsf --max-depth 1 "${ARCHIVE_REMOTE%%:*}:" > /dev/null 2>&1
 }
 
-# a dead token or a missing rclone config would otherwise go unnoticed: the
-# first miss is logged, five in a row send a message, once per visit
+# the message says the pi is up and online; a dead token or a missing rclone
+# config would otherwise go unnoticed, so the first miss is logged and five
+# in a row send a message, once per visit
 wait_until_home() {
-  local misses=0
+  local ssid connected=no misses=0
   while true; do
     if ! on_home_network; then
+      connected=no
       misses=0
       sleep 15
       continue
+    fi
+    if [ "$connected" = no ]; then
+      ssid=$(current_ssid)
+      log "home network up${ssid:+ ($ssid)}"
+      notify "connected${ssid:+ to $ssid}"
+      connected=yes
     fi
     if remote_reachable; then
       [ "$misses" = 0 ] || log "$ARCHIVE_REMOTE answers again"
@@ -723,7 +731,6 @@ cmd_run() {
   boot
   while true; do
     wait_until_home
-    log "home network up"
     NOTIFIED=
     AWAKE_UNTIL=$(($(uptime_s) + KEEP_AWAKE_MAX))
     keep_awake_on
