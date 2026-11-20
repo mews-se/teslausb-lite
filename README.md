@@ -175,13 +175,14 @@ kernel and firmware yourself with `sudo apt full-upgrade` now and then.
 
 ## Tried in a car so far
 
-On a Pi 4 the car records to the CAM drive, saves clips there and plays `LockChime.wav` from the
-LIGHTSHOW drive. Parked at home, the Pi joined the home wifi and uploaded the saved clip that was
-still in the car. The Pi's key was paired with the `charging_manager` role and `ble-test` switched
-Keep Accessory Power on and off. The rest of the cycle (pruning, keep-awake logic) has been run in a
-Debian 13 VM with `dummy_hcd` playing the car. Still to be seen in a real car: whether Keep
-Accessory Power keeps the USB ports powered once the car sleeps, and wraps and plates next to a
-light show.
+On a Pi 4 the car records to the CAM drive, saves clips there, plays `LockChime.wav` from the
+LIGHTSHOW drive and shows a license plate from the same drive. Parked at home, the Pi joins the
+wifi, uploads what the car saved while it was away and sends the Pushover messages along the way.
+The Pi's key was paired with the `charging_manager` role and `ble-test` switched Keep Accessory
+Power on and off. The rest of the cycle (pruning, keep-awake logic) has been run in a Debian 13 VM
+with `dummy_hcd` playing the car. Still to be seen in a real car: whether Keep Accessory Power
+keeps the USB ports powered once the car sleeps, so that a long upload finishes after you have
+locked the car and walked away, and wraps next to a light show.
 
 ## Credits
 
