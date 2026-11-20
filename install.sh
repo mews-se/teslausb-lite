@@ -65,8 +65,10 @@ fi
 
 install -m 755 teslausb-lite /usr/local/sbin/teslausb-lite
 install -m 644 teslausb-lite.service /etc/systemd/system/teslausb-lite.service
+fresh=no
 if [ ! -e /etc/teslausb-lite.conf ]; then
   install -m 600 teslausb-lite.conf /etc/teslausb-lite.conf
+  fresh=yes
 fi
 
 # the card loses power without warning, so keep the journal in memory
@@ -85,11 +87,17 @@ systemctl daemon-reload
 systemctl enable teslausb-lite.service
 
 echo
-echo "installed. next:"
-echo "  1. edit /etc/teslausb-lite.conf"
-echo "  2. put an rclone config with your remote in /root/.config/rclone/rclone.conf"
-if [ "$reboot" = yes ]; then
-  echo "  3. reboot (USB gadget mode was just enabled)"
+if [ "$fresh" = yes ]; then
+  echo "installed. next:"
+  echo "  1. edit /etc/teslausb-lite.conf"
+  echo "  2. put an rclone config with your remote in /root/.config/rclone/rclone.conf"
+  if [ "$reboot" = yes ]; then
+    echo "  3. reboot (USB gadget mode was just enabled)"
+  else
+    echo "  3. systemctl restart teslausb-lite"
+  fi
+elif [ "$reboot" = yes ]; then
+  echo "updated. reboot (USB gadget mode was just enabled)"
 else
-  echo "  3. systemctl restart teslausb-lite"
+  echo "updated. restart with: systemctl restart teslausb-lite"
 fi
