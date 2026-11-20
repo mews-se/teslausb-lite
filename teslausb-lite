@@ -449,7 +449,21 @@ sleep_while_home() {
   done
 }
 
+# raspberry pi os can leave bluetooth soft-blocked, and tesla-control then
+# fails with "operation not possible due to RF-kill"
+unblock_bluetooth() {
+  local r
+  for r in /sys/class/rfkill/rfkill*; do
+    if [ "$(cat "$r/type" 2> /dev/null)" = bluetooth ] &&
+      [ "$(cat "$r/soft")" = 1 ]; then
+      log "bluetooth was blocked by rfkill, unblocking it"
+      echo 0 > "$r/soft" || true
+    fi
+  done
+}
+
 ble() {
+  unblock_bluetooth
   timeout 90 tesla-control -ble -vin "$TESLA_VIN" -key-file "$BLE_KEY" "$@"
 }
 
@@ -755,6 +769,7 @@ cmd_ble_pair() {
   local role=${1:-charging_manager}
   [ -n "$TESLA_VIN" ] || die "TESLA_VIN is not set in $CONF"
   [ -e "$STATE/ble/public.pem" ] || die "run '$0 ble-keygen' first"
+  unblock_bluetooth
   echo "sit in the car with the key card ready and tap it on the console when the car asks"
   tesla-control -ble -vin "$TESLA_VIN" add-key-request "$STATE/ble/public.pem" "$role" cloud_key
 }
