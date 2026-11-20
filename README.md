@@ -1,3 +1,5 @@
+<img src="icons/icon-256.png" width="128" height="128" alt="teslausb-lite">
+
 # teslausb-lite
 
 A small take on [teslausb](https://github.com/marcone/teslausb): a Raspberry Pi acts as the car's
