@@ -105,7 +105,9 @@ State lives in `/var/lib/teslausb-lite`: the images, `uploaded` (what is in the 
 With `PUSHOVER_USER_KEY` and `PUSHOVER_APP_KEY` set, the Pi sends a Pushover message when an
 upload starts (events, files and size), when it is done (and how long it took) and when an extra
 drive gets new content. teslausb's config uses the same two names. When an upload fails, the
-retries stay quiet until they succeed or the car comes home again.
+retries stay quiet until they succeed or the car comes home again. When the archive remote has not
+answered for five minutes after the Pi got home, you get one message saying so; an expired OneDrive
+token or a missing rclone config would otherwise go unnoticed.
 
 ## Keeping the car awake
 

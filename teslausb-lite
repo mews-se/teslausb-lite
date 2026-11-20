@@ -439,16 +439,26 @@ remote_reachable() {
   timeout 60 rclone lsf --max-depth 1 "${ARCHIVE_REMOTE%%:*}:" > /dev/null 2>&1
 }
 
+# a dead token or a missing rclone config would otherwise go unnoticed: the
+# first miss is logged, five in a row send a message, once per visit
 wait_until_home() {
+  local misses=0
   while true; do
-    if on_home_network; then
-      if remote_reachable; then
-        return 0
-      fi
-      sleep 60
-    else
+    if ! on_home_network; then
+      misses=0
       sleep 15
+      continue
     fi
+    if remote_reachable; then
+      [ "$misses" = 0 ] || log "$ARCHIVE_REMOTE answers again"
+      return 0
+    fi
+    misses=$((misses + 1))
+    case $misses in
+      1) log "cannot reach $ARCHIVE_REMOTE" ;;
+      5) notify "cannot reach $ARCHIVE_REMOTE, nothing is uploaded" ;;
+    esac
+    sleep 60
   done
 }
 
