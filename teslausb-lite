@@ -190,16 +190,27 @@ check_sizes() {
     die "the new drive images and $COW_SIZE for snapshots need $(numfmt --to=iec "$need"), only $(numfmt --to=iec "$avail") is free; lower the sizes in $CONF"
 }
 
+# made under another name and renamed when done, so a failure or a power cut
+# halfway leaves nothing the next boot would take for a drive
 create_image() {
-  local name=$1 file part
+  local name=$1 file tmp part
   file=$(img "$name")
   [ -e "$file" ] && return 0
+  tmp=$file.tmp
   log "creating $file ($(drive_size "$name"))"
-  fallocate -l "$(bytes "$(drive_size "$name")")" "$file"
-  echo 'start=2048, type=7' | sfdisk -q "$file"
-  part=$(attach_part "$file")
-  mkfs.exfat -L "${name^^}" "$part" > /dev/null
-  losetup -d "${part%p1}"
+  if fallocate -l "$(bytes "$(drive_size "$name")")" "$tmp" &&
+    echo 'start=2048, type=7' | sfdisk -q "$tmp" &&
+    part=$(attach_part "$tmp"); then
+    if mkfs.exfat -L "${name^^}" "$part" > /dev/null; then
+      losetup -d "${part%p1}"
+      mv "$tmp" "$file"
+      return 0
+    fi
+    losetup -d "${part%p1}"
+  fi
+  rm -f "$tmp"
+  log "could not create the $name drive"
+  return 1
 }
 
 # items to archive, named as on the archive remote: SavedClips/<event>,
@@ -684,6 +695,7 @@ maintenance() {
 
 boot() {
   mkdir -p "$STATE" "$RUN" "$SNAP_MNT" "$WORK_MNT"
+  rm -f "$STATE"/*.img.tmp
   [ -n "$ARCHIVE_REMOTE" ] || die "ARCHIVE_REMOTE is not set in $CONF"
   check_sizes
   sysctl -q -w vm.dirty_background_bytes=65536 vm.dirty_ratio=80
