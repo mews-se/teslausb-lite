@@ -87,7 +87,8 @@ LockChime.wav
 
 The folder is mirrored: delete a file there and it goes from the car too. When something has
 changed and the car is home and not recording, the drives disconnect for a few seconds while the
-images are updated.
+images are updated. That happens at the next look, every `RESCAN_INTERVAL` seconds, or right away
+with `sudo teslausb-lite rescan`.
 
 ## Archiving
 
@@ -138,8 +139,12 @@ missing, remove its key under Controls > Locks.
 
 ```bash
 sudo teslausb-lite status
+sudo teslausb-lite rescan
 journalctl -u teslausb-lite
 ```
+
+`rescan` makes the Pi look for new clips and new content right away instead of at the next
+`RESCAN_INTERVAL`. The car has to be home; otherwise the request waits for the next arrival.
 
 ## Updating
 

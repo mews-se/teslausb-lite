@@ -470,10 +470,16 @@ wait_until_home() {
   done
 }
 
+# returns early when someone asked for a rescan
 sleep_while_home() {
   local until=$(($(uptime_s) + $1))
   while [ "$(uptime_s)" -lt "$until" ]; do
     on_home_network || return 1
+    if [ -e "$RUN/rescan" ]; then
+      rm -f "$RUN/rescan"
+      log "rescan requested"
+      return 0
+    fi
     sleep 15
   done
 }
@@ -713,7 +719,7 @@ maintenance() {
 
 boot() {
   mkdir -p "$STATE" "$RUN" "$SNAP_MNT" "$WORK_MNT"
-  rm -f "$STATE"/*.img.tmp
+  rm -f "$STATE"/*.img.tmp "$RUN/rescan"
   [ -n "$ARCHIVE_REMOTE" ] || die "ARCHIVE_REMOTE is not set in $CONF"
   check_sizes
   sysctl -q -w vm.dirty_background_bytes=65536 vm.dirty_ratio=80
@@ -784,6 +790,21 @@ cmd_status() {
   tail -n 15 "$LOG" 2> /dev/null || true
 }
 
+# the home loop picks the flag up within fifteen seconds; away from home it
+# waits there for the next arrival
+cmd_rescan() {
+  mkdir -p "$RUN"
+  touch "$RUN/rescan"
+  for _ in $(seq 1 30); do
+    if [ ! -e "$RUN/rescan" ]; then
+      echo "rescan started, watch it with '$0 status' or journalctl -fu teslausb-lite"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "nothing has picked it up yet: the service is not running or the car is not home, it happens when it is"
+}
+
 cmd_ble_keygen() {
   mkdir -p "$STATE/ble"
   chmod 700 "$STATE/ble"
@@ -817,6 +838,7 @@ usage: $0 <command>
   run              connect the drives and archive when home (the service runs this)
   stop             disconnect the drives
   status           drives, upload state and the latest log lines
+  rescan           look for new clips and content now instead of at the next interval
   ble-keygen       create the key used to keep the car awake over bluetooth
   ble-pair [role]  enroll the key in the car (default role charging_manager)
   ble-test         switch $KEEP_AWAKE_COMMAND on and off once
@@ -828,6 +850,7 @@ case ${1:-} in
   run) cmd_run ;;
   stop) cmd_stop ;;
   status) cmd_status ;;
+  rescan) cmd_rescan ;;
   ble-keygen) cmd_ble_keygen ;;
   ble-pair) shift; cmd_ble_pair "$@" ;;
   ble-test) cmd_ble_test ;;
