@@ -131,9 +131,14 @@ sudo teslausb-lite ble-test
 ```
 
 The key stays on the Pi in the car, so pair it with the narrowest role that works. `ble-pair` asks
-for `charging_manager`; if `ble-test` is refused, remove the key in the car and pair again with
-`sudo teslausb-lite ble-pair driver`. A driver key unlocks and drives the car, so if the Pi goes
-missing, remove its key under Controls > Locks.
+for `charging_manager`, which is enough for Keep Accessory Power; if `ble-test` is refused on your
+car, remove the key in the car and pair again with `sudo teslausb-lite ble-pair driver`. A driver
+key unlocks and drives the car, so if the Pi goes missing, remove its key under Controls > Locks.
+
+If `ble-pair` says the vehicle is already connected to the maximum number of BLE devices, the car
+has no free Bluetooth connection for the Pi: a phone or a watch nearby holds it. Removing the
+watch's key under Controls > Locks freed one (it can be added back afterwards); switching Bluetooth
+off on the phone or watch for a moment should do the same.
 
 ## Commands
 
@@ -172,10 +177,11 @@ kernel and firmware yourself with `sudo apt full-upgrade` now and then.
 
 On a Pi 4 the car records to the CAM drive, saves clips there and plays `LockChime.wav` from the
 LIGHTSHOW drive. Parked at home, the Pi joined the home wifi and uploaded the saved clip that was
-still in the car. The rest of the cycle (pruning, keep-awake logic) has been run in a Debian 13 VM
-with `dummy_hcd` playing the car. Still to be seen in a real car: whether Keep Accessory Power keeps
-the USB ports powered once the car sleeps, wraps and plates next to a light show, and which key role
-the car accepts.
+still in the car. The Pi's key was paired with the `charging_manager` role and `ble-test` switched
+Keep Accessory Power on and off. The rest of the cycle (pruning, keep-awake logic) has been run in a
+Debian 13 VM with `dummy_hcd` playing the car. Still to be seen in a real car: whether Keep
+Accessory Power keeps the USB ports powered once the car sleeps, and wraps and plates next to a
+light show.
 
 ## Credits
 
